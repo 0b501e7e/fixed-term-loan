@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity 0.8.7;
 
+import {VennFirewallConsumer} from "@ironblocks/firewall-consumer/contracts/consumers/VennFirewallConsumer.sol";
 import { ERC20Helper } from "../modules/erc20-helper/src/ERC20Helper.sol";
 
 import {
@@ -31,7 +32,7 @@ import { IMapleLoanFeeManager } from "./interfaces/IMapleLoanFeeManager.sol";
 
 */
 
-contract MapleLoanFeeManager is IMapleLoanFeeManager {
+contract MapleLoanFeeManager is VennFirewallConsumer, IMapleLoanFeeManager {
 
     uint256 internal constant HUNDRED_PERCENT = 100_0000;
 
@@ -51,7 +52,7 @@ contract MapleLoanFeeManager is IMapleLoanFeeManager {
     /*** Payment Functions                                                                                                              ***/
     /**************************************************************************************************************************************/
 
-    function payOriginationFees(address asset_, uint256 principalRequested_) external override returns (uint256 feePaid_) {
+    function payOriginationFees(address asset_, uint256 principalRequested_) external override firewallProtected returns (uint256 feePaid_) {
         uint256 delegateOriginationFee_ = delegateOriginationFee[msg.sender];
         uint256 platformOriginationFee_ = _getPlatformOriginationFee(msg.sender, principalRequested_);
 
@@ -64,7 +65,7 @@ contract MapleLoanFeeManager is IMapleLoanFeeManager {
         emit OriginationFeesPaid(msg.sender, delegateOriginationFee_, platformOriginationFee_);
     }
 
-    function payServiceFees(address asset_, uint256 numberOfPayments_) external override returns (uint256 feePaid_) {
+    function payServiceFees(address asset_, uint256 numberOfPayments_) external override firewallProtected returns (uint256 feePaid_) {
         (
             uint256 delegateServiceFee_,
             uint256 delegateRefinanceServiceFee_,
@@ -94,14 +95,14 @@ contract MapleLoanFeeManager is IMapleLoanFeeManager {
     /*** Fee Update Functions                                                                                                           ***/
     /**************************************************************************************************************************************/
 
-    function updateDelegateFeeTerms(uint256 delegateOriginationFee_, uint256 delegateServiceFee_) external override {
+    function updateDelegateFeeTerms(uint256 delegateOriginationFee_, uint256 delegateServiceFee_) external override firewallProtected {
         delegateOriginationFee[msg.sender] = delegateOriginationFee_;
         delegateServiceFee[msg.sender]     = delegateServiceFee_;
 
         emit FeeTermsUpdated(msg.sender, delegateOriginationFee_, delegateServiceFee_);
     }
 
-    function updatePlatformServiceFee(uint256 principalRequested_, uint256 paymentInterval_) external override {
+    function updatePlatformServiceFee(uint256 principalRequested_, uint256 paymentInterval_) external override firewallProtected {
         uint256 platformServiceFee_ = getPlatformServiceFeeForPeriod(msg.sender, principalRequested_, paymentInterval_);
 
         platformServiceFee[msg.sender] = platformServiceFee_;
@@ -109,7 +110,7 @@ contract MapleLoanFeeManager is IMapleLoanFeeManager {
         emit PlatformServiceFeeUpdated(msg.sender, platformServiceFee_);
     }
 
-    function updateRefinanceServiceFees(uint256 principalRequested_, uint256 timeSinceLastDueDate_) external override {
+    function updateRefinanceServiceFees(uint256 principalRequested_, uint256 timeSinceLastDueDate_) external override firewallProtected {
         uint256 platformRefinanceServiceFee_ = getPlatformServiceFeeForPeriod(msg.sender, principalRequested_, timeSinceLastDueDate_);
         uint256 delegateRefinanceServiceFee_ = getDelegateServiceFeesForPeriod(msg.sender, timeSinceLastDueDate_);
 
