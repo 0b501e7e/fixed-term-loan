@@ -14,6 +14,36 @@ import { IGlobalsLike, ILenderLike, IMapleProxyFactoryLike } from "./interfaces/
 
 import { MapleLoanStorage } from "./MapleLoanStorage.sol";
 
+// Custom errors
+error ML_NotFactory();
+error ML_MigrationFailed();
+error ML_ImplementationSetFailed();
+error ML_NoAuth();
+error ML_NotPendingBorrower();
+error ML_TransferFromFailed();
+error ML_PaymentIsLate();
+error ML_CannotUseDrawable();
+error ML_TransferFailed();
+error ML_InsufficientCollateral();
+error ML_InvalidDeadline();
+error ML_InvalidRefinancer();
+error ML_EmptyCalls();
+error ML_InvalidBorrower();
+error ML_NotPendingLender();
+error ML_CommitmentMismatch();
+error ML_ExpiredCommitment();
+error ML_LoanActive();
+error ML_UnexpectedFunds();
+error ML_NotImpaired();
+error ML_PastDate();
+error ML_NotInDefault();
+error ML_CollateralTransferFailed();
+error ML_FundsTransferFailed();
+error ML_Paused();
+error ML_NotBorrower();
+error ML_NotLender();
+error ML_ApproveFailed();
+
 /*
 
     ███╗   ███╗ █████╗ ██████╗ ██╗     ███████╗    ██╗      ██████╗  █████╗ ███╗   ██╗    ██╗   ██╗███████╗
@@ -43,7 +73,7 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
         _;
 
         // Either the caller is the borrower or `_drawableFunds` has not decreased.
-        require(_drawableFunds >= drawableFundsBeforePayment, "ML:CANNOT_USE_DRAWABLE");
+        if (_drawableFunds < drawableFundsBeforePayment) revert ML_CannotUseDrawable();
     }
 
     modifier onlyBorrower() {
@@ -65,18 +95,18 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     /*** Administrative Functions                                                                                                       ***/
     /**************************************************************************************************************************************/
 
-    function migrate(address migrator_, bytes calldata arguments_) external override whenNotPaused firewallProtected {
-        require(msg.sender == _factory(),        "ML:M:NOT_FACTORY");
-        require(_migrate(migrator_, arguments_), "ML:M:FAILED");
+    function migrate(address migrator_, bytes calldata arguments_) external override whenNotPaused  {
+        if (msg.sender != _factory()) revert ML_NotFactory();
+        if (!_migrate(migrator_, arguments_)) revert ML_MigrationFailed();
     }
 
-    function setImplementation(address newImplementation_) external override whenNotPaused firewallProtected {
-        require(msg.sender == _factory(),               "ML:SI:NOT_FACTORY");
-        require(_setImplementation(newImplementation_), "ML:SI:FAILED");
+    function setImplementation(address newImplementation_) external override whenNotPaused  {
+        if (msg.sender != _factory()) revert ML_NotFactory();
+        if (!_setImplementation(newImplementation_)) revert ML_ImplementationSetFailed();
     }
 
-    function upgrade(uint256 toVersion_, bytes calldata arguments_) external override whenNotPaused firewallProtected {
-        require(msg.sender == IGlobalsLike(globals()).securityAdmin(), "ML:U:NO_AUTH");
+    function upgrade(uint256 toVersion_, bytes calldata arguments_) external override whenNotPaused  {
+        if (msg.sender != IGlobalsLike(globals()).securityAdmin()) revert ML_NoAuth();
 
         emit Upgraded(toVersion_, arguments_);
 
@@ -87,8 +117,8 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     /*** Borrow Functions                                                                                                               ***/
     /**************************************************************************************************************************************/
 
-    function acceptBorrower() external override whenNotPaused firewallProtected {
-        require(msg.sender == _pendingBorrower, "ML:AB:NOT_PENDING_BORROWER");
+    function acceptBorrower() external override whenNotPaused {
+        if (msg.sender != _pendingBorrower) revert ML_NotPendingBorrower();
 
         _pendingBorrower = address(0);
 
@@ -98,17 +128,13 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     function closeLoan(uint256 amount_)
         external override whenNotPaused limitDrawableUse firewallProtected returns (uint256 principal_, uint256 interest_, uint256 fees_)
     {
-        // The amount specified is an optional amount to be transferred from the caller, as a convenience for EOAs.
-        // NOTE: FUNDS SHOULD NOT BE TRANSFERRED TO THIS CONTRACT NON-ATOMICALLY. IF THEY ARE, THE BALANCE MAY BE STOLEN USING `skim`.
-        require(
-            amount_ == uint256(0) || ERC20Helper.transferFrom(_fundsAsset, msg.sender, address(this), amount_),
-            "ML:CL:TRANSFER_FROM_FAILED"
-        );
+        if (amount_ != uint256(0) || !ERC20Helper.transferFrom(_fundsAsset, msg.sender, address(this), amount_)) {
+            revert ML_TransferFromFailed();
+        }
 
         uint256 paymentDueDate_ = _nextPaymentDueDate;
 
-        require(block.timestamp <= paymentDueDate_, "ML:CL:PAYMENT_IS_LATE");
-
+        if (block.timestamp > paymentDueDate_) revert ML_PaymentIsLate();
 
         ( principal_, interest_, ) = getClosingPaymentBreakdown();
 
@@ -127,7 +153,7 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
 
         emit LoanClosed(principal_, interest_, fees_);
 
-        require(ERC20Helper.transfer(_fundsAsset, _lender, principalAndInterest_), "ML:MP:TRANSFER_FAILED");
+        if (!ERC20Helper.transfer(_fundsAsset, _lender, principalAndInterest_)) revert ML_TransferFailed();
 
         ILenderLike(_lender).claim(principal_, interest_, paymentDueDate_, 0);
 
@@ -152,19 +178,16 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
 
         _drawableFunds -= amount_;
 
-        require(ERC20Helper.transfer(_fundsAsset, destination_, amount_), "ML:DF:TRANSFER_FAILED");
-        require(_isCollateralMaintained(),                                "ML:DF:INSUFFICIENT_COLLATERAL");
+        if (!ERC20Helper.transfer(_fundsAsset, destination_, amount_)) revert ML_TransferFailed();
+        if (!_isCollateralMaintained()) revert ML_InsufficientCollateral();
     }
 
     function makePayment(uint256 amount_)
         external override whenNotPaused limitDrawableUse firewallProtected returns (uint256 principal_, uint256 interest_, uint256 fees_)
     {
-        // The amount specified is an optional amount to be transfer from the caller, as a convenience for EOAs.
-        // NOTE: FUNDS SHOULD NOT BE TRANSFERRED TO THIS CONTRACT NON-ATOMICALLY. IF THEY ARE, THE BALANCE MAY BE STOLEN USING `skim`.
-        require(
-            amount_ == uint256(0) || ERC20Helper.transferFrom(_fundsAsset, msg.sender, address(this), amount_),
-            "ML:MP:TRANSFER_FROM_FAILED"
-        );
+        if (amount_ != uint256(0) || !ERC20Helper.transferFrom(_fundsAsset, msg.sender, address(this), amount_)) {
+            revert ML_TransferFromFailed();
+        }
 
         ( principal_, interest_, ) = getNextPaymentBreakdown();
 
@@ -195,22 +218,19 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
 
         emit PaymentMade(principal_, interest_, fees_);
 
-        require(ERC20Helper.transfer(_fundsAsset, _lender, principalAndInterest_), "ML:MP:TRANSFER_FAILED");
+        if (!ERC20Helper.transfer(_fundsAsset, _lender, principalAndInterest_)) revert ML_TransferFailed();
 
         ILenderLike(_lender).claim(principal_, interest_, previousPaymentDueDate_, nextPaymentDueDate_);
 
         emit FundsClaimed(principalAndInterest_, _lender);
 
-        require(_isCollateralMaintained(), "ML:MP:INSUFFICIENT_COLLATERAL");
+        if (!_isCollateralMaintained()) revert ML_InsufficientCollateral();
     }
 
     function postCollateral(uint256 amount_) public override whenNotPaused returns (uint256 collateralPosted_) {
-        // The amount specified is an optional amount to be transfer from the caller, as a convenience for EOAs.
-        // NOTE: FUNDS SHOULD NOT BE TRANSFERRED TO THIS CONTRACT NON-ATOMICALLY. IF THEY ARE, THE BALANCE MAY BE STOLEN USING `skim`.
-        require(
-            amount_ == uint256(0) || ERC20Helper.transferFrom(_collateralAsset, msg.sender, address(this), amount_),
-            "ML:PC:TRANSFER_FROM_FAILED"
-        );
+        if (amount_ != uint256(0) && !ERC20Helper.transferFrom(_collateralAsset, msg.sender, address(this), amount_)) {
+            revert ML_TransferFromFailed();
+        }
 
         _collateral += (collateralPosted_ = getUnaccountedAmount(_collateralAsset));
 
@@ -218,11 +238,11 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     }
 
     function proposeNewTerms(address refinancer_, uint256 deadline_, bytes[] calldata calls_)
-        external override whenNotPaused onlyBorrower firewallProtected returns (bytes32 refinanceCommitment_)
+        external override whenNotPaused onlyBorrower returns (bytes32 refinanceCommitment_)
     {
-        require(deadline_ >= block.timestamp,                                       "ML:PNT:INVALID_DEADLINE");
-        require(IGlobalsLike(globals()).isInstanceOf("FT_REFINANCER", refinancer_), "ML:PNT:INVALID_REFINANCER");
-        require(calls_.length > uint256(0),                                         "ML:PNT:EMPTY_CALLS");
+        if (deadline_ < block.timestamp) revert ML_InvalidDeadline();
+        if (!IGlobalsLike(globals()).isInstanceOf("FT_REFINANCER", refinancer_)) revert ML_InvalidRefinancer();
+        if (calls_.length == uint256(0)) revert ML_EmptyCalls();
 
         emit NewTermsProposed(
             _refinanceCommitment = refinanceCommitment_ = _getRefinanceCommitment(refinancer_, deadline_, calls_),
@@ -237,25 +257,22 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
 
         _collateral -= amount_;
 
-        require(ERC20Helper.transfer(_collateralAsset, destination_, amount_), "ML:RC:TRANSFER_FAILED");
-        require(_isCollateralMaintained(),                                     "ML:RC:INSUFFICIENT_COLLATERAL");
+        if (!ERC20Helper.transfer(_collateralAsset, destination_, amount_)) revert ML_TransferFailed();
+        if (!_isCollateralMaintained()) revert ML_InsufficientCollateral();
     }
 
     function returnFunds(uint256 amount_) external override whenNotPaused firewallProtected returns (uint256 fundsReturned_) {
-        // The amount specified is an optional amount to be transfer from the caller, as a convenience for EOAs.
-        // NOTE: FUNDS SHOULD NOT BE TRANSFERRED TO THIS CONTRACT NON-ATOMICALLY. IF THEY ARE, THE BALANCE MAY BE STOLEN USING `skim`.
-        require(
-            amount_ == uint256(0) || ERC20Helper.transferFrom(_fundsAsset, msg.sender, address(this), amount_),
-            "ML:RF:TRANSFER_FROM_FAILED"
-        );
+        if (amount_ != uint256(0) || !ERC20Helper.transferFrom(_fundsAsset, msg.sender, address(this), amount_)) {
+            revert ML_TransferFromFailed();
+        }
 
         _drawableFunds += (fundsReturned_ = getUnaccountedAmount(_fundsAsset));
 
         emit FundsReturned(fundsReturned_);
     }
 
-    function setPendingBorrower(address pendingBorrower_) external override whenNotPaused onlyBorrower firewallProtected {
-        require(IGlobalsLike(globals()).isBorrower(pendingBorrower_), "ML:SPB:INVALID_BORROWER");
+    function setPendingBorrower(address pendingBorrower_) external override whenNotPaused onlyBorrower {
+        if (!IGlobalsLike(globals()).isBorrower(pendingBorrower_)) revert ML_InvalidBorrower();
 
         emit PendingBorrowerSet(_pendingBorrower = pendingBorrower_);
     }
@@ -265,7 +282,7 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     /**************************************************************************************************************************************/
 
     function acceptLender() external override whenNotPaused firewallProtected {
-        require(msg.sender == _pendingLender, "ML:AL:NOT_PENDING_LENDER");
+        if (msg.sender != _pendingLender) revert ML_NotPendingLender();
 
         _pendingLender = address(0);
 
@@ -273,15 +290,13 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     }
 
     function acceptNewTerms(address refinancer_, uint256 deadline_, bytes[] calldata calls_)
-        external override whenNotPaused onlyLender firewallProtected returns (bytes32 refinanceCommitment_)
+        external override whenNotPaused onlyLender  returns (bytes32 refinanceCommitment_)
     {
-        // NOTE: A zero refinancer address and/or empty calls array will never (probabilistically) match a refinance commitment in storage.
-        require(
-            _refinanceCommitment == (refinanceCommitment_ = _getRefinanceCommitment(refinancer_, deadline_, calls_)),
-            "ML:ANT:COMMITMENT_MISMATCH"
-        );
+        if (_refinanceCommitment != (refinanceCommitment_ = _getRefinanceCommitment(refinancer_, deadline_, calls_))) {
+            revert ML_CommitmentMismatch();
+        }
 
-        require(refinancer_.code.length != uint256(0), "ML:ANT:INVALID_REFINANCER");
+        if (refinancer_.code.length == uint256(0)) revert ML_InvalidRefinancer();
 
         require(block.timestamp <= deadline_, "ML:ANT:EXPIRED_COMMITMENT");
 
@@ -312,7 +327,7 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
 
         for (uint256 i_; i_ < calls_.length; ++i_) {
             ( bool success_, ) = refinancer_.delegatecall(calls_[i_]);
-            require(success_, "ML:ANT:FAILED");
+            if (!success_) revert ML_MigrationFailed();
         }
 
         // TODO: Emit this before the refinance calls in order to adhere to the CEI pattern.
@@ -333,21 +348,21 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
         _drawableFunds -= feeManager_.payOriginationFees(fundsAsset_, principalRequested_);
 
         // Ensure that collateral is maintained after changes made.
-        require(_isCollateralMaintained(),                       "ML:ANT:INSUFFICIENT_COLLATERAL");
-        require(getUnaccountedAmount(fundsAsset_) == uint256(0), "ML:ANT:UNEXPECTED_FUNDS");
+        if (!_isCollateralMaintained()) revert ML_InsufficientCollateral();
+        if (getUnaccountedAmount(fundsAsset_) != uint256(0)) revert ML_UnexpectedFunds();
     }
 
-    function fundLoan() external override whenNotPaused onlyLender firewallProtected returns (uint256 fundsLent_) {
+    function fundLoan() external override whenNotPaused onlyLender  returns (uint256 fundsLent_) {
         address lender_ = _lender;
 
         // Can only fund loan if there are payments remaining (defined in the initialization) and no payment is due (as set by a funding).
-        require((_nextPaymentDueDate == uint256(0)) && (_paymentsRemaining != uint256(0)), "ML:FL:LOAN_ACTIVE");
+        if ((_nextPaymentDueDate != uint256(0)) && (_paymentsRemaining != uint256(0))) revert ML_LoanActive();
 
         address fundsAsset_         = _fundsAsset;
         uint256 paymentInterval_    = _paymentInterval;
         uint256 principalRequested_ = _principalRequested;
 
-        require(ERC20Helper.approve(fundsAsset_, _feeManager, type(uint256).max), "ML:FL:APPROVE_FAIL");
+        if (!ERC20Helper.approve(fundsAsset_, _feeManager, type(uint256).max)) revert ML_ApproveFailed(); 
 
         // Saves the platform service fee rate for future payments.
         IMapleLoanFeeManager(_feeManager).updatePlatformServiceFee(principalRequested_, paymentInterval_);
@@ -356,7 +371,7 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
 
         _drawableFunds += (principalRequested_ - originationFees_);
 
-        require(getUnaccountedAmount(fundsAsset_) == uint256(0), "ML:FL:UNEXPECTED_FUNDS");
+        if (getUnaccountedAmount(fundsAsset_) != uint256(0)) revert ML_UnexpectedFunds();
 
         emit Funded(
             lender_,
@@ -380,8 +395,8 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     function removeLoanImpairment() external override whenNotPaused onlyLender firewallProtected {
         uint256 originalNextPaymentDueDate_ = _originalNextPaymentDueDate;
 
-        require(originalNextPaymentDueDate_ != 0,               "ML:RLI:NOT_IMPAIRED");
-        require(block.timestamp <= originalNextPaymentDueDate_, "ML:RLI:PAST_DATE");
+        if (originalNextPaymentDueDate_ == 0) revert ML_NotImpaired();
+        if (block.timestamp > originalNextPaymentDueDate_) revert ML_PastDate();
 
         _nextPaymentDueDate = originalNextPaymentDueDate_;
         delete _originalNextPaymentDueDate;
@@ -394,10 +409,7 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     {
         uint256 nextPaymentDueDate_ = _nextPaymentDueDate;
 
-        require(
-            nextPaymentDueDate_ != uint256(0) && (block.timestamp > nextPaymentDueDate_ + _gracePeriod),
-            "ML:R:NOT_IN_DEFAULT"
-        );
+        if (nextPaymentDueDate_ == uint256(0) && (block.timestamp <= nextPaymentDueDate_ + _gracePeriod)) revert ML_NotInDefault();
 
         _clearLoanAccounting();
 
@@ -408,20 +420,16 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
         address collateralAsset_ = _collateralAsset;
 
         // Either there is no collateral to repossess, or the transfer of the collateral succeeds.
-        require(
-            (collateralRepossessed_ = getUnaccountedAmount(collateralAsset_)) == uint256(0) ||
-            ERC20Helper.transfer(collateralAsset_, destination_, collateralRepossessed_),
-            "ML:R:C_TRANSFER_FAILED"
-        );
+        if ((collateralRepossessed_ = getUnaccountedAmount(collateralAsset_)) != uint256(0) || !ERC20Helper.transfer(collateralAsset_, destination_, collateralRepossessed_)) {
+            revert ML_CollateralTransferFailed();
+        }
 
         address fundsAsset_ = _fundsAsset;
 
         // Either there are no funds to repossess, or the transfer of the funds succeeds.
-        require(
-            (fundsRepossessed_ = getUnaccountedAmount(fundsAsset_)) == uint256(0) ||
-            ERC20Helper.transfer(fundsAsset_, destination_, fundsRepossessed_),
-            "ML:R:F_TRANSFER_FAILED"
-        );
+        if ((fundsRepossessed_ = getUnaccountedAmount(fundsAsset_)) != uint256(0) || !ERC20Helper.transfer(fundsAsset_, destination_, fundsRepossessed_)) {
+            revert ML_FundsTransferFailed();
+        }
 
         emit Repossessed(collateralRepossessed_, fundsRepossessed_, destination_);
     }
@@ -437,12 +445,11 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     function rejectNewTerms(address refinancer_, uint256 deadline_, bytes[] calldata calls_)
         external override whenNotPaused firewallProtected returns (bytes32 refinanceCommitment_)
     {
-        require((msg.sender == _borrower) || (msg.sender == _lender), "ML:RNT:NO_AUTH");
+        if ((msg.sender != _borrower) || (msg.sender != _lender)) revert ML_NoAuth();
 
-        require(
-            _refinanceCommitment == (refinanceCommitment_ = _getRefinanceCommitment(refinancer_, deadline_, calls_)),
-            "ML:RNT:COMMITMENT_MISMATCH"
-        );
+        if (_refinanceCommitment != (refinanceCommitment_ = _getRefinanceCommitment(refinancer_, deadline_, calls_))) {
+            revert ML_CommitmentMismatch();
+        }
 
         _refinanceCommitment = bytes32(0);
 
@@ -451,7 +458,7 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
 
     function skim(address token_, address destination_) external override whenNotPaused firewallProtected returns (uint256 skimmed_) {
         emit Skimmed(token_, skimmed_ = getUnaccountedAmount(token_), destination_);
-        require(ERC20Helper.transfer(token_, destination_, skimmed_), "ML:S:TRANSFER_FAILED");
+        if (!ERC20Helper.transfer(token_, destination_, skimmed_)) revert ML_TransferFailed();
     }
 
     /**************************************************************************************************************************************/
@@ -900,15 +907,15 @@ contract MapleLoan is VennFirewallConsumer, IMapleLoan, MapleProxiedInternals, M
     }
 
     function _revertIfNotBorrower() internal view {
-        require(msg.sender == _borrower, "ML:NOT_BORROWER");
+        if (msg.sender != _borrower) revert ML_NotBorrower();
     }
 
     function _revertIfNotLender() internal view {
-        require(msg.sender == _lender, "ML:NOT_LENDER");
+        if (msg.sender != _lender) revert ML_NotLender();
     }
 
     function _revertIfPaused() internal view {
-        require(!IGlobalsLike(globals()).isFunctionPaused(msg.sig), "L:PAUSED");
+        if (IGlobalsLike(globals()).isFunctionPaused(msg.sig)) revert ML_Paused();
     }
 
     /**
